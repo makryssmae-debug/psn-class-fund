@@ -385,7 +385,12 @@ function isRealStudentName(name) {
   const n = String(name ?? "").trim();
   if (!n) return false;
   const lower = n.toLowerCase().trim();
-  return !["total", "grand total", "others", "fund turnover & others"].includes(lower);
+  // Dropped-out students are excluded here so they never appear in the
+  // roster, lookup index, or event totals.
+  const dropped = ["ambid, marilyn", "marilyn ambid"];
+  return ![
+    "total", "grand total", "others", "fund turnover & others", ...dropped
+  ].includes(lower);
 }
 
 function editDistance(a, b) {
@@ -465,7 +470,10 @@ function parseWorkbook(classRows, eventRows) {
   const classHeader = classRows[0] || [];
   const classDates = classRows[1] || [];
 
-  for (let c = 1; c < classHeader.length; c++) {
+  // The class fund only runs for 6 weeks (₱20 x 6 = ₱120 total), so
+  // any extra date columns beyond the 6th are ignored.
+  const MAX_WEEKS = 6;
+  for (let c = 1; c < classHeader.length && weekly.length < MAX_WEEKS; c++) {
     const d = parseHeaderDate(classDates[c]);
     if (d && dateKey(d) <= today) {
       weekly.push({
@@ -762,6 +770,33 @@ async function checkBalance() {
 }
 
 document.getElementById("checkBtn").addEventListener("click", checkBalance);
+
+const copyBtn = document.getElementById("copyBtn");
+const gcashNumberEl = document.getElementById("gcashNumber");
+copyBtn.addEventListener("click", async function() {
+  const number = gcashNumberEl.textContent.trim();
+  try {
+    await navigator.clipboard.writeText(number);
+  } catch (err) {
+    // Clipboard API can fail (older browsers, no HTTPS, etc.) — fall back
+    // to the classic select-and-copy trick.
+    const temp = document.createElement("textarea");
+    temp.value = number;
+    temp.style.position = "fixed";
+    temp.style.opacity = "0";
+    document.body.appendChild(temp);
+    temp.select();
+    try { document.execCommand("copy"); } catch (e) {}
+    document.body.removeChild(temp);
+  }
+  const original = copyBtn.textContent;
+  copyBtn.textContent = "Copied!";
+  copyBtn.classList.add("copied");
+  setTimeout(function() {
+    copyBtn.textContent = original;
+    copyBtn.classList.remove("copied");
+  }, 1500);
+});
 
 input.addEventListener("keydown", function(e) {
   if (e.key === "Enter") {
