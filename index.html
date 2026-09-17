@@ -470,9 +470,13 @@ function parseWorkbook(classRows, eventRows) {
   const classHeader = classRows[0] || [];
   const classDates = classRows[1] || [];
 
-  // The class fund only runs for 6 weeks (₱20 x 6 = ₱120 total), so
-  // any extra date columns beyond the 6th are ignored.
-  const MAX_WEEKS = 6;
+  // The class fund started Monday, Aug 10, 2026 (Week 1), and one more
+  // week unlocks automatically every following Monday. This means a
+  // student who paid ahead for a future week's column in the Sheet
+  // won't have it counted until that week actually arrives.
+  const CLASS_FUND_START = dateKey(new Date(2026, 7, 10)); // Aug 10, 2026
+  const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+  const MAX_WEEKS = Math.max(0, Math.floor((today - CLASS_FUND_START) / WEEK_MS) + 1);
   for (let c = 1; c < classHeader.length && weekly.length < MAX_WEEKS; c++) {
     const d = parseHeaderDate(classDates[c]);
     if (d && dateKey(d) <= today) {
@@ -810,4 +814,4 @@ loadInitial();
 
 </body>
 </html>
-
+switch to Google Sheets
