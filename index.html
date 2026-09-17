@@ -194,7 +194,18 @@
   button.copy:hover { border-color: var(--rim); color: var(--rim); }
   button.copy.copied { border-color: var(--settled); color: var(--settled); }
   .pay-hint { margin: 10px 0 0; font-size: 13px; color: var(--ink-soft); }
-
+// Copy GCash Number Handler
+  copyBtn.addEventListener('click', () => {
+    const num = document.getElementById('gcashNum').innerText.replace(/\s+/g, '');
+    navigator.clipboard.writeText(num).then(() => {
+      copyBtn.innerText = 'Copied!';
+      copyBtn.classList.add('copied');
+      setTimeout(() => {
+        copyBtn.innerText = 'Copy';
+        copyBtn.classList.remove('copied');
+      }, 2000);
+    });
+  });
   @media (max-width: 430px) {
     .qr { width: 180px; }
   }
