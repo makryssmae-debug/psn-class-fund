@@ -243,15 +243,109 @@
 
 <script>
 /* ============================================================
-   Excel-powered Class Fund Balance Checker
-   Workbook expected:
+   Google Sheets–powered Class Fund Balance Checker
+   Reads live from the "PSN Book For 2nd Year" Google Sheet via
+   File > Share > Publish to web (per-tab CSV export):
    - "Class List": row 1 = headers, row 2 = weekly dates,
      column A = student names, B onward = weekly payments.
    - "Events": row 1 = event names, row 2 = event dates,
      column A = student names, B onward = event payments.
+   No re-upload needed — edit the Sheet and it's live immediately.
    ============================================================ */
 
-const EXCEL_FILE = "PSN Book For 2nd Year.xlsx";
+/* These come from Google Sheets: File > Share > Publish to web,
+   picking each tab individually and "Comma-separated values (.csv)". */
+const CLASS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQq7PQd3jO3qngzC_kuylI6xxuLATX9rE9hDJUqtBpeZ7D7CAiQf0SbNuLT9n2M_Q/pub?gid=1394406202&single=true&output=csv";
+const EVENTS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQq7PQd3jO3qngzC_kuylI6xxuLATX9rE9hDJUqtBpeZ7D7CAiQf0SbNuLT9n2M_Q/pub?gid=718047367&single=true&output=csv";
+
+/* Minimal CSV parser: handles quoted fields, embedded commas,
+   escaped quotes ("") and both \n and \r\n line endings. */
+function parseCSV(text) {
+  const rows = [];
+  let row = [];
+  let field = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else {
+        field += c;
+      }
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ',') {
+      row.push(field); field = "";
+    } else if (c === '\r') {
+      // ignore; the following \n (if any) ends the row
+    } else if (c === '\n') {
+      row.push(field); rows.push(row); row = []; field = "";
+    } else {
+      field += c;
+    }
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+/* Fetches one published tab as CSV and returns it as a plain 2D
+   array of strings (row 0 = the sheet's actual row 1, etc.) — the
+   same shape the old Excel reader produced with header:1. */
+async function fetchCsvRows(url, label) {
+  let response;
+  try {
+    response = await fetch(url + (url.includes("?") ? "&" : "?") + "_=" + Date.now(), { cache: "no-store" });
+  } catch (e) {
+    throw new Error('Could not reach the "' + label + '" data.');
+  }
+  if (!response.ok) {
+    throw new Error('Could not load the "' + label + '" data (HTTP ' + response.status + ').');
+  }
+  let text = await response.text();
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1); // strip BOM
+  return parseCSV(text).filter(r => r.some(cell => String(cell).trim() !== ""));
+}
+
+/* Strips currency symbols/commas/whitespace so "₱20.00", "20.00"
+   and "20" all parse the same way, regardless of how Google's CSV
+   export happens to format a given column. */
+function toNumber(raw) {
+  if (raw === null || raw === undefined) return NaN;
+  const cleaned = String(raw).replace(/[^\d.\-]/g, "");
+  if (!cleaned) return NaN;
+  return Number(cleaned);
+}
+
+const MONTH_INDEX = { jan:0, feb:1, mar:2, apr:3, may:4, jun:5, jul:6, aug:7, sep:8, oct:9, nov:10, dec:11 };
+
+/* Header dates like "10-Aug" carry no year once exported as CSV
+   (Google exports the displayed text, and the sheet's format hides
+   the year). Full dates with an explicit year still parse normally;
+   for the year-less "D-Mon" style, the year is inferred from the
+   current Aug–Jul school-year cycle. */
+function parseHeaderDate(raw) {
+  const s = String(raw ?? "").trim();
+  if (!s) return null;
+
+  if (/\d{4}/.test(s)) {
+    const d = new Date(s);
+    if (!isNaN(d)) return d;
+  }
+
+  const m = s.match(/^(\d{1,2})[-\s]([A-Za-z]{3,})$/);
+  if (!m) return null;
+  const day = Number(m[1]);
+  const mon = MONTH_INDEX[m[2].slice(0, 3).toLowerCase()];
+  if (mon === undefined || !day) return null;
+
+  const now = new Date();
+  const academicStartYear = now.getMonth() >= 7 ? now.getFullYear() : now.getFullYear() - 1;
+  const year = mon >= 7 ? academicStartYear : academicStartYear + 1;
+  return new Date(year, mon, day);
+}
 
 const peso = new Intl.NumberFormat("en-PH", {
   style: "currency", currency: "PHP", minimumFractionDigits: 0
@@ -275,19 +369,6 @@ function normalize(str) {
     .replace(/\bsr\b/g, "senior")
     .replace(/\s+/g, " ")
     .trim();
-}
-
-function excelDateToDate(value) {
-  if (value instanceof Date) return value;
-  if (typeof value === "number" && window.XLSX && XLSX.SSF) {
-    const parsed = XLSX.SSF.parse_date_code(value);
-    if (parsed) return new Date(parsed.y, parsed.m - 1, parsed.d);
-  }
-  if (typeof value === "string") {
-    const d = new Date(value);
-    if (!isNaN(d)) return d;
-  }
-  return null;
 }
 
 function dateKey(d) {
@@ -375,16 +456,7 @@ function positiveMode(values) {
   return best;
 }
 
-function parseWorkbook(workbook) {
-  const classSheet = workbook.Sheets["Class List"];
-  const eventSheet = workbook.Sheets["Events"];
-
-  if (!classSheet) throw new Error('The workbook does not contain a sheet named "Class List".');
-  if (!eventSheet) throw new Error('The workbook does not contain a sheet named "Events".');
-
-  const classRows = XLSX.utils.sheet_to_json(classSheet, { header: 1, raw: true, defval: null });
-  const eventRows = XLSX.utils.sheet_to_json(eventSheet, { header: 1, raw: true, defval: null });
-
+function parseWorkbook(classRows, eventRows) {
   const today = todayKey();
 
   // Weekly Class List:
@@ -394,7 +466,7 @@ function parseWorkbook(workbook) {
   const classDates = classRows[1] || [];
 
   for (let c = 1; c < classHeader.length; c++) {
-    const d = excelDateToDate(classDates[c]);
+    const d = parseHeaderDate(classDates[c]);
     if (d && dateKey(d) <= today) {
       weekly.push({
         label: d.toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" }),
@@ -413,7 +485,7 @@ function parseWorkbook(workbook) {
 
     let weeklyPaid = 0;
     weekly.forEach(w => {
-      const value = Number(classRows[r][w.col]);
+      const value = toNumber(classRows[r][w.col]);
       if (Number.isFinite(value) && value > 0) weeklyPaid += value;
     });
 
@@ -434,13 +506,13 @@ function parseWorkbook(workbook) {
     const label = eventHeaders[c];
     if (!label) continue;
 
-    const eventDate = excelDateToDate(eventDates[c]);
+    const eventDate = parseHeaderDate(eventDates[c]);
     const values = [];
 
     for (let r = 2; r < eventRows.length; r++) {
       const name = eventRows[r] && eventRows[r][0];
       if (!isRealStudentName(name)) continue;
-      const value = Number(eventRows[r][c]);
+      const value = toNumber(eventRows[r][c]);
       if (Number.isFinite(value) && value > 0) values.push(value);
     }
 
@@ -469,7 +541,7 @@ function parseWorkbook(workbook) {
         for (let r = 2; r < eventRows.length; r++) {
           const name = eventRows[r] && eventRows[r][0];
           if (isRealStudentName(name) && String(name).trim() === student.name) {
-            const value = Number(eventRows[r][ev.col]);
+            const value = toNumber(eventRows[r][ev.col]);
             if (Number.isFinite(value) && value > 0) paid = value;
             break;
           }
@@ -580,7 +652,7 @@ function showRecord(person) {
           (totalBalance > 0 ? peso.format(totalBalance) : 'Fully paid') +
         '</strong>' +
       '</div>' +
-      '<p class="note">Data is read directly from the Excel workbook. Blank weekly cells are treated as unpaid. Event amounts are based on the most common positive amount recorded for that event.</p>' +
+      '<p class="note">Data is read live from Google Sheets. Blank weekly cells are treated as unpaid. Event amounts are based on the most common positive amount recorded for that event.</p>' +
     '</div>';
 
   resultEl.classList.add("shown");
@@ -619,14 +691,44 @@ function showMiss(query) {
   resultEl.classList.add("shown");
 }
 
-function checkBalance() {
-  if (!roster.length) {
-    resultEl.innerHTML =
-      '<div class="miss"><p>The Excel data has not loaded yet.</p><p>Please wait a moment and try again.</p></div>';
-    resultEl.classList.add("shown");
-    return;
-  }
+/* Fetches both tabs fresh from Google Sheets and rebuilds the roster.
+   Called on page load, and again every time someone hits "Check" —
+   so a balance is always read straight from whatever is in the
+   Sheet right now, with no redeploy needed after edits. */
+async function fetchAndParse() {
+  const [classRows, eventRows] = await Promise.all([
+    fetchCsvRows(CLASS_CSV_URL, "Class List"),
+    fetchCsvRows(EVENTS_CSV_URL, "Events")
+  ]);
+  parseWorkbook(classRows, eventRows);
+  loadedFrom = "Google Sheets";
+  rebuildIndex();
+}
 
+async function loadInitial() {
+  if (loading) return;
+  loading = true;
+
+  resultEl.innerHTML = '<div class="miss"><p>Loading the latest data…</p></div>';
+  resultEl.classList.add("shown");
+
+  try {
+    await fetchAndParse();
+    resultEl.innerHTML =
+      '<div class="miss"><p><strong>Data loaded.</strong></p><p>Type a student name above to check the balance.</p></div>';
+  } catch (error) {
+    console.error("Class fund checker load error:", error.message);
+    resultEl.innerHTML =
+      '<div class="miss">' +
+        '<p><strong>Could not load data right now.</strong></p>' +
+        '<p>Please try again in a moment, or refresh the page.</p>' +
+      '</div>';
+  } finally {
+    loading = false;
+  }
+}
+
+async function checkBalance() {
   if (!input.value.trim()) {
     resultEl.innerHTML = '<div class="miss"><p>Type your name first.</p></div>';
     resultEl.classList.add("shown");
@@ -634,41 +736,29 @@ function checkBalance() {
     return;
   }
 
+  if (loading) return;
+  loading = true;
+  resultEl.innerHTML = '<div class="miss"><p>Checking the latest data…</p></div>';
+  resultEl.classList.add("shown");
+
+  try {
+    await fetchAndParse();
+  } catch (error) {
+    console.error("Class fund checker refresh error:", error.message);
+    resultEl.innerHTML =
+      '<div class="miss">' +
+        '<p><strong>Could not load data right now.</strong></p>' +
+        '<p>Please try again in a moment.</p>' +
+      '</div>';
+    loading = false;
+    return;
+  }
+  loading = false;
+
   const query = normalize(input.value);
   const hit = index.get(query);
   if (hit) showRecord(hit);
   else showMiss(query);
-}
-
-async function loadExcelFromUrl() {
-  if (loading) return;
-  loading = true;
-
-  resultEl.innerHTML = '<div class="miss"><p>Loading the latest Excel data…</p></div>';
-  resultEl.classList.add("shown");
-
-  try {
-    const response = await fetch(EXCEL_FILE + "?v=" + Date.now(), { cache: "no-store" });
-    if (!response.ok) throw new Error("Excel file could not be loaded (" + response.status + ").");
-
-    const arrayBuffer = await response.arrayBuffer();
-    const workbook = XLSX.read(arrayBuffer, { type: "array", cellDates: true });
-    parseWorkbook(workbook);
-    loadedFrom = "Excel";
-    rebuildIndex();
-
-    resultEl.innerHTML =
-      '<div class="miss"><p><strong>Excel data loaded.</strong></p><p>Type a student name above to check the balance.</p></div>';
-  } catch (error) {
-    resultEl.innerHTML =
-      '<div class="miss">' +
-        '<p><strong>Excel data could not be loaded automatically.</strong></p>' +
-        '<p>' + escapeHtml(error.message) + '</p>' +
-        '<p>Make sure <strong>' + escapeHtml(EXCEL_FILE) + '</strong> is uploaded in the same site/folder as this HTML file.</p>' +
-      '</div>';
-  } finally {
-    loading = false;
-  }
 }
 
 document.getElementById("checkBtn").addEventListener("click", checkBalance);
@@ -680,19 +770,9 @@ input.addEventListener("keydown", function(e) {
   }
 });
 
-/* Load SheetJS, then load the workbook automatically. */
-(function loadSheetJS() {
-  const s = document.createElement("script");
-  s.src = "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js";
-  s.onload = loadExcelFromUrl;
-  s.onerror = function() {
-    resultEl.innerHTML =
-      '<div class="miss"><p>Could not load the Excel reader.</p><p>Check your internet connection and refresh the page.</p></div>';
-    resultEl.classList.add("shown");
-  };
-  document.head.appendChild(s);
-})();
+loadInitial();
 </script>
 
 </body>
 </html>
+switch to Google Sheets
